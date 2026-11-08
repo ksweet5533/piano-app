@@ -1,6 +1,7 @@
 import { freqToMidi, LOWEST, HIGHEST } from "./notes";
 
-const MIN_LEVEL = 0.002;
+const MIN_LEVEL = 0.0003; // just above digital silence; loudness is judged against the room
+export const RUMBLE_CUTOFF = 150; // Hz; fans, traffic and handling noise sit below this. Piano overtones carry low notes.
 
 export function rmsOf(input: Float32Array) {
   let sum = 0;
@@ -52,7 +53,7 @@ export function detectPitch(input: Float32Array, sampleRate: number) {
 
 export type MicReading = { level: number; note?: number; released?: boolean };
 
-const MIN_CLARITY = 0.85;
+const MIN_CLARITY = 0.7;
 const ATTACK_JUMP = 1.6; // how much louder than a moment ago a key strike must be
 const ABOVE_ROOM = 3; // how much louder than the room's background noise
 const LISTEN_FRAMES = 8; // how long after a strike to wait for a steady pitch
@@ -79,7 +80,7 @@ export class MicNoteTracker {
     const reading: MicReading = { level };
     if (this.room < 0) {
       // The first reading is the room as it is, hum and all.
-      this.room = Math.max(level, 0.0005);
+      this.room = Math.max(level, MIN_LEVEL);
       this.lastLevel = level;
       return reading;
     }
@@ -139,7 +140,10 @@ export async function startMic(
   if (ctx.state === "suspended") await ctx.resume();
   const analyser = ctx.createAnalyser();
   analyser.fftSize = 2048;
-  ctx.createMediaStreamSource(stream).connect(analyser);
+  const rumble = ctx.createBiquadFilter();
+  rumble.type = "highpass";
+  rumble.frequency.value = RUMBLE_CUTOFF;
+  ctx.createMediaStreamSource(stream).connect(rumble).connect(analyser);
   const buf = new Float32Array(analyser.fftSize);
   const tracker = new MicNoteTracker(ctx.sampleRate);
 

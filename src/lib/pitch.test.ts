@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { midiToFreq } from "./notes";
-import { MicNoteTracker } from "./pitch";
+import { MicNoteTracker, RUMBLE_CUTOFF } from "./pitch";
 
 // Simulated rooms: what a laptop mic hears, frame by frame, as the app reads it.
 const SR = 48000;
@@ -35,13 +35,30 @@ const voice = (from: number, to: number, a: number): Sound => (t) => {
   return a * syllable * (Math.sin(phase) + 0.6 * Math.sin(2 * phase) + 0.4 * Math.sin(3 * phase) + 0.3 * (Math.random() - 0.5));
 };
 
+/** The same rumble filter the app puts in front of the tracker (Web Audio's "highpass" biquad). */
+function highPass(x: Float32Array) {
+  const w = (2 * Math.PI * RUMBLE_CUTOFF) / SR;
+  const alpha = Math.sin(w) / (2 * Math.SQRT1_2);
+  const cos = Math.cos(w);
+  const [b0, b1, b2] = [(1 + cos) / 2, -(1 + cos), (1 + cos) / 2];
+  const [a0, a1, a2] = [1 + alpha, -2 * cos, 1 - alpha];
+  let [x1, x2, y1, y2] = [0, 0, 0, 0];
+  for (let i = 0; i < x.length; i++) {
+    const y = (b0 * x[i] + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2) / a0;
+    [x2, x1, y2, y1] = [x1, x[i], y1, y];
+    x[i] = y;
+  }
+  return x;
+}
+
 function heard(sounds: Sound[], seconds: number) {
+  const signal = new Float32Array(Math.floor(seconds * SR));
+  for (let i = 0; i < signal.length; i++) for (const s of sounds) signal[i] += s(i / SR);
+  highPass(signal);
   const tracker = new MicNoteTracker(SR);
   const notes: number[] = [];
-  for (let start = 0; start + N < seconds * SR; start += HOP) {
-    const buf = new Float32Array(N);
-    for (let i = 0; i < N; i++) for (const s of sounds) buf[i] += s((start + i) / SR);
-    const r = tracker.push(buf);
+  for (let start = 0; start + N < signal.length; start += HOP) {
+    const r = tracker.push(signal.slice(start, start + N));
     if (r.note !== undefined) notes.push(r.note);
   }
   return notes;
@@ -59,6 +76,11 @@ describe("MicNoteTracker", () => {
   it("hears playing over a hum", () => expect(heard([noise(0.002), hum(120, 0.005), ...played(0.08)], 4.5)).toEqual(expected));
   it("hears playing while someone talks", () =>
     expect(heard([noise(0.002), voice(0.3, 4.2, 0.02), ...played()], 4.5)).toEqual(expected));
-  it("stays silent before guessing when the piano is buried under a hum", () =>
-    expect(heard([noise(0.002), hum(120, 0.01), ...played(0.03)], 4.5)).toEqual([]));
+  it("hears playing at a normal home volume, with low rumble in the room", () =>
+    // Matches a real laptop recording of an FP-10: notes only a few times above the room.
+    expect(heard([noise(0.0015), hum(70, 0.003), ...played(0.012)], 4.5)).toEqual(expected));
+  it("ignores talking in a quiet room with rumble", () =>
+    expect(heard([noise(0.0015), hum(70, 0.003), voice(0.5, 4, 0.01)], 4.5)).toEqual([]));
+  it("hears soft playing under a loud hum, once the rumble filter removes it", () =>
+    expect(heard([noise(0.002), hum(120, 0.01), ...played(0.03)], 4.5)).toEqual(expected));
 });
