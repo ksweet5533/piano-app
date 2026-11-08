@@ -1,7 +1,8 @@
 import { fft } from "./fft";
-import { freqToMidi, LOWEST, HIGHEST } from "./notes";
+import { freqToMidi, HIGHEST, LOWEST, midiToFreq } from "./notes";
 
 const MIN_LEVEL = 0.0003; // just above digital silence; loudness is judged against the room
+const TOP_OCTAVE = 96; // C7; above here a note's own frequency is its loudest
 
 /** Every knob the mic listener has, so they can be tuned against real recordings. */
 export type MicSettings = {
@@ -16,6 +17,14 @@ export type MicSettings = {
   steadyFrames: number; // readings in a row that must agree
   steadyCents: number; // how closely they must agree; voices wobble more than this
   votes: number; // or: readings of the same note, in any order, after one strike (0 turns this off)
+  trebleCutoff: number; // Hz; a second listener above the key-and-hammer thump, for the top keys (0 turns it off)
+  trebleWindow: number; // samples it looks at; top notes are short and repeat fast
+  trebleFrom: number; // lowest note (MIDI) it may vote for
+  trebleClarity: number; // how cleanly the high wave must repeat to vote
+  topProminence: number; // top octave: how far the loudest frequency must stand above the rest
+  topCents: number; // top octave: how close to a real note it must be
+  topVotes: number; // top octave: readings needed; these notes fade within a third of a second
+  refractory: number; // readings after a note during which no new strike can start; one strike can thump twice
 };
 
 /** Tuned on a laptop-mic take of an FP-10 (all white keys, 3 strikes each) plus the simulated rooms in micRooms.ts. */
@@ -25,12 +34,20 @@ export const MIC_SETTINGS: MicSettings = {
   levelWindow: 1024,
   peakPick: 0.9,
   minClarity: 0.6,
-  attackJump: 2.2,
-  aboveRoom: 2,
+  attackJump: 1.3,
+  aboveRoom: 3,
   listenFrames: 24,
   steadyFrames: 4,
   steadyCents: 20,
   votes: 5,
+  trebleCutoff: 700,
+  trebleWindow: 1024,
+  trebleFrom: 84,
+  trebleClarity: 0.8,
+  topProminence: 20,
+  topCents: 40,
+  topVotes: 2,
+  refractory: 8,
 };
 
 export function rmsOf(input: Float32Array) {
@@ -44,10 +61,10 @@ export function rmsOf(input: Float32Array) {
  * computed with an FFT so long windows stay cheap. Clarity runs from 0 to 1:
  * near 1 for a clean repeating wave, lower for voices, clatter and hiss.
  */
-export function detectPitch(input: Float32Array, sampleRate: number, peakPick = MIC_SETTINGS.peakPick) {
+export function detectPitch(input: Float32Array, sampleRate: number, peakPick = MIC_SETTINGS.peakPick, minLevel = MIN_LEVEL) {
   const none = { freq: -1, clarity: 0 };
   const n = input.length;
-  if (rmsOf(input) < MIN_LEVEL) return none;
+  if (rmsOf(input) < minLevel) return none;
 
   let size = 1;
   while (size < 2 * n) size <<= 1;
@@ -96,6 +113,28 @@ export function detectPitch(input: Float32Array, sampleRate: number, peakPick = 
   return { freq: sampleRate / (pick + shift), clarity: Math.min(1, x2 - (a * shift * shift)) };
 }
 
+/**
+ * The loudest frequency, and how far it stands above the rest of the spectrum
+ * (its strength over the median). Used for the top octave, where a note's own
+ * frequency is its loudest and the waves are too short to time reliably.
+ */
+export function loudestPeak(input: Float32Array, sampleRate: number) {
+  let size = 1;
+  while (size < input.length * 2) size <<= 1;
+  const re = new Float64Array(size);
+  const im = new Float64Array(size);
+  for (let i = 0; i < input.length; i++) re[i] = input[i] * (0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (input.length - 1)));
+  fft(re, im);
+  const mag = new Float64Array(size / 2);
+  for (let k = 0; k < mag.length; k++) mag[k] = Math.hypot(re[k], im[k]);
+  let best = 2;
+  for (let k = 2; k < mag.length - 1; k++) if (mag[k] > mag[best]) best = k;
+  const [a, b, c] = [mag[best - 1], mag[best], mag[best + 1]];
+  const shift = a - 2 * b + c ? (0.5 * (a - c)) / (a - 2 * b + c) : 0;
+  const median = Float64Array.from(mag).sort()[mag.length >> 1];
+  return { freq: ((best + shift) * sampleRate) / size, prominence: median > 0 ? b / median : 0 };
+}
+
 export type MicReading = { level: number; note?: number; released?: boolean };
 
 /**
@@ -111,14 +150,18 @@ export class MicNoteTracker {
   private count = 0;
   private tally = new Map<number, number>();
   private sounding = false;
+  private quiet = 0;
 
   constructor(
     private sampleRate: number,
     private s: MicSettings = MIC_SETTINGS,
   ) {}
 
-  /** buf is the pitch window; its last levelWindow samples decide loudness. */
-  push(buf: Float32Array): MicReading {
+  /**
+   * buf is the pitch window; its last levelWindow samples decide loudness.
+   * treble, when given, is the same moment with only the high end kept.
+   */
+  push(buf: Float32Array, treble?: Float32Array): MicReading {
     const s = this.s;
     const level = rmsOf(buf.subarray(Math.max(0, buf.length - s.levelWindow)));
     const reading: MicReading = { level };
@@ -130,7 +173,8 @@ export class MicNoteTracker {
     }
     const loudEnough = level > Math.max(this.room * s.aboveRoom, MIN_LEVEL * 2);
 
-    if (loudEnough && level > this.lastLevel * s.attackJump) {
+    if (this.quiet > 0) this.quiet--;
+    else if (loudEnough && level > this.lastLevel * s.attackJump) {
       this.listening = s.listenFrames;
       this.candidate = -1;
       this.count = 0;
@@ -147,24 +191,42 @@ export class MicNoteTracker {
     if (this.listening <= 0) return reading;
     this.listening--;
 
+    const emit = (midi: number) => {
+      this.listening = 0;
+      this.quiet = s.refractory;
+      this.sounding = true;
+      reading.note = midi;
+    };
+    const vote = (midi: number, needed = s.votes) => {
+      const votes = (this.tally.get(midi) ?? 0) + 1;
+      this.tally.set(midi, votes);
+      return needed > 0 && votes === needed;
+    };
+
     const { freq, clarity } = detectPitch(buf, this.sampleRate, s.peakPick);
     const midi = freq > 0 ? freqToMidi(freq) : -1;
     if (clarity < s.minClarity || midi < LOWEST || midi > HIGHEST) {
       this.candidate = -1;
       this.count = 0;
-      return reading;
+    } else {
+      const steady = this.candidate > 0 && Math.abs(1200 * Math.log2(freq / this.candidate)) < s.steadyCents;
+      this.count = steady ? this.count + 1 : 1;
+      this.candidate = freq;
+      // Low keys start with hammer noise and wander between readings, so a note
+      // can also win by turning up often enough in the moments after the strike.
+      if (vote(midi) || this.count === s.steadyFrames) return emit(midi), reading;
     }
-    const steady = this.candidate > 0 && Math.abs(1200 * Math.log2(freq / this.candidate)) < s.steadyCents;
-    this.count = steady ? this.count + 1 : 1;
-    this.candidate = freq;
-    // Low keys start with hammer noise and wander between readings, so a note
-    // can also win by turning up often enough in the moments after the strike.
-    const votes = (this.tally.get(midi) ?? 0) + 1;
-    this.tally.set(midi, votes);
-    if (this.count === s.steadyFrames || (s.votes > 0 && votes === s.votes)) {
-      this.listening = 0;
-      this.sounding = true;
-      reading.note = midi;
+
+    // Top keys are quiet next to the thump of the key, so the high end gets its own say.
+    if (treble) {
+      const high = detectPitch(treble, this.sampleRate, s.peakPick, MIN_LEVEL / 10);
+      const highMidi = high.freq > 0 ? freqToMidi(high.freq) : -1;
+      if (high.clarity >= s.trebleClarity && highMidi >= s.trebleFrom && highMidi < TOP_OCTAVE && vote(highMidi)) return emit(highMidi), reading;
+
+      const peak = loudestPeak(treble, this.sampleRate);
+      const peakMidi = freqToMidi(peak.freq);
+      const offTune = Math.abs(1200 * Math.log2(peak.freq / midiToFreq(peakMidi)));
+      if (peakMidi >= TOP_OCTAVE && peakMidi <= HIGHEST && offTune < s.topCents && peak.prominence >= s.topProminence && vote(peakMidi, s.topVotes)) emit(peakMidi);
     }
     return reading;
   }
@@ -204,14 +266,25 @@ export class HighPass {
   }
 }
 
+/** The ring buffer's contents, oldest sample first. */
+function latest(ring: Float32Array, filled: number) {
+  const start = filled % ring.length;
+  const frame = new Float32Array(ring.length);
+  frame.set(ring.subarray(start));
+  frame.set(ring.subarray(0, start), ring.length - start);
+  return frame;
+}
+
 /**
  * Raw mic samples in, key presses out. Filters out rumble, then looks at the
  * latest window of sound 30 times a second, whatever the screen's refresh rate.
  */
 export class MicListener {
   private filter: HighPass;
+  private trebleFilters: HighPass[];
   private tracker: MicNoteTracker;
   private ring: Float32Array;
+  private trebleRing: Float32Array;
   private filled = 0;
   private sinceLast = 0;
   private hop: number;
@@ -222,24 +295,26 @@ export class MicListener {
     settings: MicSettings = MIC_SETTINGS,
   ) {
     this.filter = new HighPass(sampleRate, settings.rumbleCutoff);
+    // Two in a row, so the thump falls away twice as steeply.
+    this.trebleFilters = settings.trebleCutoff > 0 ? [new HighPass(sampleRate, settings.trebleCutoff), new HighPass(sampleRate, settings.trebleCutoff)] : [];
     this.tracker = new MicNoteTracker(sampleRate, settings);
     this.ring = new Float32Array(settings.window);
+    this.trebleRing = new Float32Array(settings.trebleCutoff > 0 ? settings.trebleWindow : 0);
     this.hop = Math.round(sampleRate / 30);
   }
 
   feed(block: Float32Array) {
     const size = this.ring.length;
+    const tsize = this.trebleRing.length;
     const filtered = this.filter.process(block);
+    const treble = this.trebleFilters.reduce((x, f) => f.process(x), block);
     for (let i = 0; i < filtered.length; i++) {
       this.ring[this.filled % size] = filtered[i];
+      if (tsize) this.trebleRing[this.filled % tsize] = treble[i];
       this.filled++;
       if (++this.sinceLast >= this.hop && this.filled >= size) {
         this.sinceLast = 0;
-        const start = this.filled % size;
-        const frame = new Float32Array(size);
-        frame.set(this.ring.subarray(start));
-        frame.set(this.ring.subarray(0, start), size - start);
-        this.onReading(this.tracker.push(frame));
+        this.onReading(this.tracker.push(latest(this.ring, this.filled), tsize ? latest(this.trebleRing, this.filled) : undefined));
       }
     }
   }
