@@ -15,6 +15,7 @@ export type MicSettings = {
   listenFrames: number; // how long after a strike to wait for a steady pitch
   steadyFrames: number; // readings in a row that must agree
   steadyCents: number; // how closely they must agree; voices wobble more than this
+  votes: number; // or: readings of the same note, in any order, after one strike (0 turns this off)
 };
 
 /** Tuned on a laptop-mic take of an FP-10 (all white keys, 3 strikes each) plus the simulated rooms in micRooms.ts. */
@@ -26,9 +27,10 @@ export const MIC_SETTINGS: MicSettings = {
   minClarity: 0.6,
   attackJump: 2.2,
   aboveRoom: 2,
-  listenFrames: 12,
+  listenFrames: 24,
   steadyFrames: 4,
   steadyCents: 20,
+  votes: 5,
 };
 
 export function rmsOf(input: Float32Array) {
@@ -107,6 +109,7 @@ export class MicNoteTracker {
   private listening = 0;
   private candidate = -1;
   private count = 0;
+  private tally = new Map<number, number>();
   private sounding = false;
 
   constructor(
@@ -131,6 +134,7 @@ export class MicNoteTracker {
       this.listening = s.listenFrames;
       this.candidate = -1;
       this.count = 0;
+      this.tally.clear();
     }
     // The room level drops quickly to quiet moments and creeps up slowly, so a held note doesn't raise it much.
     this.room = level < this.room ? this.room * 0.7 + level * 0.3 : this.room * 1.01;
@@ -153,7 +157,11 @@ export class MicNoteTracker {
     const steady = this.candidate > 0 && Math.abs(1200 * Math.log2(freq / this.candidate)) < s.steadyCents;
     this.count = steady ? this.count + 1 : 1;
     this.candidate = freq;
-    if (this.count === s.steadyFrames) {
+    // Low keys start with hammer noise and wander between readings, so a note
+    // can also win by turning up often enough in the moments after the strike.
+    const votes = (this.tally.get(midi) ?? 0) + 1;
+    this.tally.set(midi, votes);
+    if (this.count === s.steadyFrames || (s.votes > 0 && votes === s.votes)) {
       this.listening = 0;
       this.sounding = true;
       reading.note = midi;
