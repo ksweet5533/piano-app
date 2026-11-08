@@ -1,7 +1,8 @@
 # Calibration recordings
 
-Each `.wav` here is a take from the app's Calibrate tab: every key on a real piano, bottom to top,
-with a `keys` chunk that says which key was being played when. `npm test` replays each one through
-the mic listener and fails if any key is missed or heard as a wrong note.
+Real piano audio that `npm test` replays through the mic listener, so tuning can only move forward.
 
-Add a take by downloading it from the Calibrate tab and saving it in this folder.
+- **Known-sequence takes** (`takes.json`): a plain WAV of keys played in a known order, with the
+  score it must meet or beat. Raise `atLeast` / lower `atMost` whenever the listener improves.
+- **Calibrate tab takes** (`piano-calibration-*.wav`): downloaded from the app, with every key
+  labeled. Each key must be heard, and heard as nothing else.

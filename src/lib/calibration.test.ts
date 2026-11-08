@@ -1,9 +1,8 @@
-import { readdirSync, readFileSync } from "fs";
+import { existsSync, readFileSync, readdirSync } from "fs";
 import { join } from "path";
 import { describe, expect, it } from "vitest";
-import { decodeCalibrationWav, encodeCalibrationWav, toInt16 } from "./calibration";
-import { noteName } from "./notes";
-import { MicListener } from "./pitch";
+import { decodeCalibrationWav, encodeCalibrationWav, listen, scoreSequence, toInt16 } from "./calibration";
+import { HIGHEST, LOWEST, isBlack, noteName } from "./notes";
 
 it("a calibration WAV keeps its audio and key labels", async () => {
   const audio = toInt16(Float32Array.from({ length: 1000 }, (_, i) => Math.sin(i / 10) * 0.5));
@@ -15,30 +14,71 @@ it("a calibration WAV keeps its audio and key labels", async () => {
   expect(decoded.samples[100]).toBeCloseTo(Math.sin(10) * 0.5, 3);
 });
 
-/** Replays a recording through the app's listener, as one continuous take, and sorts what it heard by key. */
-export function replay(bytes: Uint8Array) {
-  const { sampleRate, samples, meta } = decodeCalibrationWav(bytes);
-  const heardAt: { sample: number; midi: number }[] = [];
-  let at = 0;
-  const listener = new MicListener(sampleRate, (r) => r.note !== undefined && heardAt.push({ sample: at, midi: r.note }));
-  for (; at < samples.length; at += 128) listener.feed(samples.subarray(at, at + 128));
-  return meta.keys.map((k) => {
-    const heard = heardAt.filter((h) => h.sample > k.start && h.sample <= k.start + k.length).map((h) => h.midi);
-    const right = heard.filter((m) => m === k.midi).length;
-    return { midi: k.midi, heard, right, wrong: heard.length - right };
-  });
-}
+it("scoring lines up what was heard with what was played", () => {
+  expect(scoreSequence([60, 62, 65, 67], [60, 62, 64, 65, 67])).toMatchObject({ right: 4, wrong: 0, missed: 1, extra: 0 });
+  expect(scoreSequence([60, 62, 62], [60, 62])).toMatchObject({ right: 2, extra: 1 });
+  expect(scoreSequence([60, 74], [60, 62])).toMatchObject({ right: 1, wrong: 1, octave: 1 });
+});
 
 const DIR = join(import.meta.dirname, "../../calibration");
-const takes = readdirSync(DIR).filter((f) => f.endsWith(".wav"));
 
-describe.skipIf(takes.length === 0)("real piano recordings", () => {
-  for (const file of takes) {
+/** Plain 16-bit mono WAV, as recorded outside the app. */
+function readPlainWav(bytes: Uint8Array) {
+  const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let sampleRate = 48000;
+  for (let o = 12; o + 8 <= bytes.length; ) {
+    const tag = String.fromCharCode(...bytes.subarray(o, o + 4));
+    const size = v.getUint32(o + 4, true);
+    if (tag === "fmt ") sampleRate = v.getUint32(o + 12, true);
+    if (tag === "data") {
+      const n = Math.min(size, bytes.length - o - 8) >> 1;
+      const samples = new Float32Array(n);
+      for (let i = 0; i < n; i++) samples[i] = v.getInt16(o + 8 + i * 2, true) / 32768;
+      return { sampleRate, samples };
+    }
+    o += 8 + size + (size % 2);
+  }
+  throw new Error("No audio in this WAV.");
+}
+
+type Take = {
+  file: string;
+  played: { from: string; to: string; keys: "white" | "all"; strikes: number };
+  atLeast: { right: number };
+  atMost: { wrong: number; extra: number };
+};
+const byName = (name: string) => Array.from({ length: HIGHEST - LOWEST + 1 }, (_, i) => LOWEST + i).find((m) => noteName(m) === name)!;
+
+describe("real piano takes, known sequence", () => {
+  const takes: Take[] = existsSync(join(DIR, "takes.json")) ? JSON.parse(readFileSync(join(DIR, "takes.json"), "utf8")) : [];
+  for (const take of takes) {
+    it.skipIf(!existsSync(join(DIR, take.file)))(`${take.file} does at least as well as before`, () => {
+      const { sampleRate, samples } = readPlainWav(readFileSync(join(DIR, take.file)));
+      const played: number[] = [];
+      for (let m = byName(take.played.from); m <= byName(take.played.to); m++) {
+        if (take.played.keys === "white" && isBlack(m)) continue;
+        for (let s = 0; s < take.played.strikes; s++) played.push(m);
+      }
+      const score = scoreSequence(listen(samples, sampleRate).map((h) => h.midi), played);
+      console.log(`${take.file}: ${score.right}/${played.length} right, ${score.wrong} wrong (${score.octave} octave), ${score.missed} missed, ${score.extra} extra`);
+      expect(score.right).toBeGreaterThanOrEqual(take.atLeast.right);
+      expect(score.wrong).toBeLessThanOrEqual(take.atMost.wrong);
+      expect(score.extra).toBeLessThanOrEqual(take.atMost.extra);
+    });
+  }
+});
+
+const labeled = existsSync(DIR) ? readdirSync(DIR).filter((f) => f.startsWith("piano-calibration-") && f.endsWith(".wav")) : [];
+
+describe.skipIf(labeled.length === 0)("real piano takes from the Calibrate tab", () => {
+  for (const file of labeled) {
     it(`hears every key in ${file}`, () => {
-      const report = replay(readFileSync(join(DIR, file)));
-      const problems = report
-        .filter((k) => k.wrong > 0 || k.right === 0)
-        .map((k) => `${noteName(k.midi)}: heard ${k.heard.map(noteName).join(" ") || "nothing"}`);
+      const { sampleRate, samples, meta } = decodeCalibrationWav(readFileSync(join(DIR, file)));
+      const heard = listen(samples, sampleRate);
+      const problems = meta.keys
+        .map((k) => ({ k, got: heard.filter((h) => h.sample > k.start && h.sample <= k.start + k.length).map((h) => h.midi) }))
+        .filter(({ k, got }) => !got.includes(k.midi) || got.some((m) => m !== k.midi))
+        .map(({ k, got }) => `${noteName(k.midi)}: heard ${got.map(noteName).join(" ") || "nothing"}`);
       expect(problems).toEqual([]);
     });
   }

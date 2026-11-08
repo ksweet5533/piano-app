@@ -1,7 +1,35 @@
+import { fft } from "./fft";
 import { freqToMidi, LOWEST, HIGHEST } from "./notes";
 
 const MIN_LEVEL = 0.0003; // just above digital silence; loudness is judged against the room
-export const RUMBLE_CUTOFF = 150; // Hz; fans, traffic and handling noise sit below this. Piano overtones carry low notes.
+
+/** Every knob the mic listener has, so they can be tuned against real recordings. */
+export type MicSettings = {
+  rumbleCutoff: number; // Hz; fans, traffic and handling noise sit below this. Piano overtones carry low notes.
+  window: number; // samples looked at for pitch; long enough for two cycles of the lowest note
+  levelWindow: number; // samples looked at for loudness; short, so strikes stand out
+  peakPick: number; // take the first repeat of the wave at least this strong compared with the best
+  minClarity: number; // how cleanly the wave must repeat; voices and clatter score lower
+  attackJump: number; // how much louder than a moment ago a key strike must be
+  aboveRoom: number; // how much louder than the room's background noise
+  listenFrames: number; // how long after a strike to wait for a steady pitch
+  steadyFrames: number; // readings in a row that must agree
+  steadyCents: number; // how closely they must agree; voices wobble more than this
+};
+
+/** Tuned on a laptop-mic take of an FP-10 (all white keys, 3 strikes each) plus the simulated rooms in micRooms.ts. */
+export const MIC_SETTINGS: MicSettings = {
+  rumbleCutoff: 180,
+  window: 4096,
+  levelWindow: 1024,
+  peakPick: 0.9,
+  minClarity: 0.6,
+  attackJump: 2.2,
+  aboveRoom: 2,
+  listenFrames: 12,
+  steadyFrames: 4,
+  steadyCents: 20,
+};
 
 export function rmsOf(input: Float32Array) {
   let sum = 0;
@@ -10,55 +38,63 @@ export function rmsOf(input: Float32Array) {
 }
 
 /**
- * Autocorrelation pitch estimate for one buffer. Clarity runs from 0 to 1:
- * near 1 for a clean held tone, much lower for voices, clatter and hiss.
+ * Pitch from the normalized square difference function (McLeod's method),
+ * computed with an FFT so long windows stay cheap. Clarity runs from 0 to 1:
+ * near 1 for a clean repeating wave, lower for voices, clatter and hiss.
  */
-export function detectPitch(input: Float32Array, sampleRate: number) {
+export function detectPitch(input: Float32Array, sampleRate: number, peakPick = MIC_SETTINGS.peakPick) {
   const none = { freq: -1, clarity: 0 };
+  const n = input.length;
   if (rmsOf(input) < MIN_LEVEL) return none;
 
-  let start = 0;
-  let end = input.length - 1;
-  const threshold = 0.2;
-  for (let i = 0; i < input.length / 2; i++) if (Math.abs(input[i]) < threshold) { start = i; break; }
-  for (let i = 1; i < input.length / 2; i++) if (Math.abs(input[input.length - i]) < threshold) { end = input.length - i; break; }
-  const buf = input.slice(start, end);
-  const size = buf.length;
-
-  const c = new Float32Array(size);
-  for (let lag = 0; lag < size; lag++) {
-    let sum = 0;
-    for (let j = 0; j < size - lag; j++) sum += buf[j] * buf[j + lag];
-    c[lag] = sum;
+  let size = 1;
+  while (size < 2 * n) size <<= 1;
+  const re = new Float64Array(size);
+  const im = new Float64Array(size);
+  re.set(input);
+  fft(re, im);
+  for (let i = 0; i < size; i++) {
+    re[i] = re[i] * re[i] + im[i] * im[i];
+    im[i] = 0;
   }
-  let d = 0;
-  while (d < size - 1 && c[d] > c[d + 1]) d++;
-  let best = -1;
-  for (let i = d; i < size; i++) if (c[i] > best) best = c[i];
-  // Take the first peak nearly as strong as the best one. Later peaks are the
+  fft(re, im, true);
+
+  const minLag = Math.max(2, Math.floor(sampleRate / 4600)); // a little above C8
+  const maxLag = Math.min(Math.floor(n / 2), Math.ceil(sampleRate / 25)); // a little below A0
+  const nsdf = new Float64Array(maxLag + 2);
+  let m = 0;
+  for (let i = 0; i < n; i++) m += 2 * input[i] * input[i];
+  for (let lag = 0; lag <= maxLag + 1; lag++) {
+    if (lag > 0) m -= input[lag - 1] * input[lag - 1] + input[n - lag] * input[n - lag];
+    nsdf[lag] = m > 0 ? (2 * (re[lag] / size)) / m : 0;
+  }
+
+  // Highest point of each positive stretch after the wave first falls below zero.
+  const peaks: number[] = [];
+  let lag = 1;
+  while (lag <= maxLag && nsdf[lag] > 0) lag++;
+  while (lag <= maxLag) {
+    while (lag <= maxLag && nsdf[lag] <= 0) lag++;
+    let best = -1;
+    while (lag <= maxLag && nsdf[lag] > 0) {
+      if (best < 0 || nsdf[lag] > nsdf[best]) best = lag;
+      lag++;
+    }
+    if (best >= minLag) peaks.push(best);
+  }
+  if (!peaks.length) return none;
+  const top = Math.max(...peaks.map((p) => nsdf[p]));
+  // Take the first repeat nearly as strong as the best one. Later ones are the
   // same wave repeating, and picking them would read the note an octave or a fifth low.
-  let lag = -1;
-  for (let i = Math.max(d, 1); i < size - 1; i++) {
-    if (c[i] >= 0.9 * best && c[i] >= c[i - 1] && c[i] >= c[i + 1]) { lag = i; break; }
-  }
-  if (lag <= 0 || lag >= size - 1 || c[0] <= 0) return none;
-
-  // Correlation at the period, scaled for the samples that overlap at that lag.
-  const clarity = (c[lag] / c[0]) * (size / (size - lag));
-  const [x1, x2, x3] = [c[lag - 1], c[lag], c[lag + 1]];
+  const pick = peaks.find((p) => nsdf[p] >= peakPick * top)!;
+  const [x1, x2, x3] = [nsdf[pick - 1], nsdf[pick], nsdf[pick + 1]];
   const a = (x1 + x3 - 2 * x2) / 2;
   const b = (x3 - x1) / 2;
-  return { freq: sampleRate / (a ? lag - b / (2 * a) : lag), clarity };
+  const shift = a ? -b / (2 * a) : 0;
+  return { freq: sampleRate / (pick + shift), clarity: Math.min(1, x2 - (a * shift * shift)) };
 }
 
 export type MicReading = { level: number; note?: number; released?: boolean };
-
-const MIN_CLARITY = 0.7;
-const ATTACK_JUMP = 1.6; // how much louder than a moment ago a key strike must be
-const ABOVE_ROOM = 3; // how much louder than the room's background noise
-const LISTEN_FRAMES = 8; // how long after a strike to wait for a steady pitch
-const STEADY_FRAMES = 3; // readings in a row that must agree
-const STEADY_CENTS = 20; // how closely they must agree; voices wobble more than this
 
 /**
  * Turns a stream of mic buffers into key presses. A note counts only right
@@ -73,10 +109,15 @@ export class MicNoteTracker {
   private count = 0;
   private sounding = false;
 
-  constructor(private sampleRate: number) {}
+  constructor(
+    private sampleRate: number,
+    private s: MicSettings = MIC_SETTINGS,
+  ) {}
 
+  /** buf is the pitch window; its last levelWindow samples decide loudness. */
   push(buf: Float32Array): MicReading {
-    const level = rmsOf(buf);
+    const s = this.s;
+    const level = rmsOf(buf.subarray(Math.max(0, buf.length - s.levelWindow)));
     const reading: MicReading = { level };
     if (this.room < 0) {
       // The first reading is the room as it is, hum and all.
@@ -84,10 +125,10 @@ export class MicNoteTracker {
       this.lastLevel = level;
       return reading;
     }
-    const loudEnough = level > Math.max(this.room * ABOVE_ROOM, MIN_LEVEL * 2);
+    const loudEnough = level > Math.max(this.room * s.aboveRoom, MIN_LEVEL * 2);
 
-    if (loudEnough && level > this.lastLevel * ATTACK_JUMP) {
-      this.listening = LISTEN_FRAMES;
+    if (loudEnough && level > this.lastLevel * s.attackJump) {
+      this.listening = s.listenFrames;
       this.candidate = -1;
       this.count = 0;
     }
@@ -102,17 +143,17 @@ export class MicNoteTracker {
     if (this.listening <= 0) return reading;
     this.listening--;
 
-    const { freq, clarity } = detectPitch(buf, this.sampleRate);
+    const { freq, clarity } = detectPitch(buf, this.sampleRate, s.peakPick);
     const midi = freq > 0 ? freqToMidi(freq) : -1;
-    if (clarity < MIN_CLARITY || midi < LOWEST || midi > HIGHEST) {
+    if (clarity < s.minClarity || midi < LOWEST || midi > HIGHEST) {
       this.candidate = -1;
       this.count = 0;
       return reading;
     }
-    const steady = this.candidate > 0 && Math.abs(1200 * Math.log2(freq / this.candidate)) < STEADY_CENTS;
+    const steady = this.candidate > 0 && Math.abs(1200 * Math.log2(freq / this.candidate)) < s.steadyCents;
     this.count = steady ? this.count + 1 : 1;
     this.candidate = freq;
-    if (this.count === STEADY_FRAMES) {
+    if (this.count === s.steadyFrames) {
       this.listening = 0;
       this.sounding = true;
       reading.note = midi;
@@ -155,37 +196,41 @@ export class HighPass {
   }
 }
 
-const WINDOW = 2048;
-
 /**
  * Raw mic samples in, key presses out. Filters out rumble, then looks at the
- * latest 2048 samples about 30 times a second, whatever the screen's refresh rate.
+ * latest window of sound 30 times a second, whatever the screen's refresh rate.
  */
 export class MicListener {
   private filter: HighPass;
   private tracker: MicNoteTracker;
-  private ring = new Float32Array(WINDOW);
+  private ring: Float32Array;
   private filled = 0;
   private sinceLast = 0;
   private hop: number;
 
-  constructor(sampleRate: number, private onReading: (r: MicReading) => void) {
-    this.filter = new HighPass(sampleRate, RUMBLE_CUTOFF);
-    this.tracker = new MicNoteTracker(sampleRate);
+  constructor(
+    sampleRate: number,
+    private onReading: (r: MicReading) => void,
+    settings: MicSettings = MIC_SETTINGS,
+  ) {
+    this.filter = new HighPass(sampleRate, settings.rumbleCutoff);
+    this.tracker = new MicNoteTracker(sampleRate, settings);
+    this.ring = new Float32Array(settings.window);
     this.hop = Math.round(sampleRate / 30);
   }
 
   feed(block: Float32Array) {
+    const size = this.ring.length;
     const filtered = this.filter.process(block);
     for (let i = 0; i < filtered.length; i++) {
-      this.ring[this.filled % WINDOW] = filtered[i];
+      this.ring[this.filled % size] = filtered[i];
       this.filled++;
-      if (++this.sinceLast >= this.hop && this.filled >= WINDOW) {
+      if (++this.sinceLast >= this.hop && this.filled >= size) {
         this.sinceLast = 0;
-        const start = this.filled % WINDOW;
-        const frame = new Float32Array(WINDOW);
+        const start = this.filled % size;
+        const frame = new Float32Array(size);
         frame.set(this.ring.subarray(start));
-        frame.set(this.ring.subarray(0, start), WINDOW - start);
+        frame.set(this.ring.subarray(0, start), size - start);
         this.onReading(this.tracker.push(frame));
       }
     }

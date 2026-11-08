@@ -1,3 +1,6 @@
+import { noteName } from "./notes";
+import { MIC_SETTINGS, MicListener, type MicSettings } from "./pitch";
+
 /**
  * A calibration take: one WAV of everything the mic heard, plus a "keys" chunk
  * saying which key was being played when. Audio editors ignore the extra chunk.
@@ -62,3 +65,60 @@ export const toInt16 = (block: Float32Array) => {
   for (let i = 0; i < block.length; i++) out[i] = Math.max(-32768, Math.min(32767, Math.round(block[i] * 32767)));
   return out;
 };
+
+/** Runs a take through the app's listener the way the browser feeds it, in 128-sample blocks. */
+export function listen(samples: Float32Array, sampleRate: number, settings: MicSettings = MIC_SETTINGS) {
+  const heard: { sample: number; midi: number }[] = [];
+  let at = 0;
+  const listener = new MicListener(sampleRate, (r) => r.note !== undefined && heard.push({ sample: at, midi: r.note }), settings);
+  for (; at < samples.length; at += 128) listener.feed(samples.subarray(at, at + 128));
+  return heard;
+}
+
+/**
+ * Lines up what was heard with the notes known to have been played, in order,
+ * and counts each strike as right, wrong (with octave slips noted), missed, or extra.
+ */
+export function scoreSequence(heard: number[], played: number[]) {
+  const n = played.length;
+  const k = heard.length;
+  const cost = Array.from({ length: n + 1 }, () => new Float64Array(k + 1));
+  const step = Array.from({ length: n + 1 }, () => new Uint8Array(k + 1)); // 0 pair, 1 missed, 2 extra
+  for (let i = 1; i <= n; i++) [cost[i][0], step[i][0]] = [i, 1];
+  for (let j = 1; j <= k; j++) [cost[0][j], step[0][j]] = [j, 2];
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= k; j++) {
+      const p = played[i - 1];
+      const h = heard[j - 1];
+      const pair = cost[i - 1][j - 1] + (p === h ? 0 : p % 12 === h % 12 ? 1.2 : 1.8);
+      const options = [pair, cost[i - 1][j] + 1, cost[i][j - 1] + 1];
+      const best = options.indexOf(Math.min(...options));
+      cost[i][j] = options[best];
+      step[i][j] = best;
+    }
+  }
+  const result = { right: 0, wrong: 0, octave: 0, missed: 0, extra: 0, problems: [] as string[] };
+  for (let i = n, j = k; i > 0 || j > 0; ) {
+    const s = i > 0 && j > 0 ? step[i][j] : i > 0 ? 1 : 2;
+    if (s === 0) {
+      const [p, h] = [played[i - 1], heard[j - 1]];
+      if (p === h) result.right++;
+      else {
+        result.wrong++;
+        if (p % 12 === h % 12) result.octave++;
+        result.problems.unshift(`${noteName(p)} heard as ${noteName(h)}`);
+      }
+      i--;
+      j--;
+    } else if (s === 1) {
+      result.missed++;
+      result.problems.unshift(`${noteName(played[i - 1])} missed`);
+      i--;
+    } else {
+      result.extra++;
+      result.problems.unshift(`extra ${noteName(heard[j - 1])}`);
+      j--;
+    }
+  }
+  return result;
+}
