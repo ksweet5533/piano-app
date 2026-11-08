@@ -106,11 +106,11 @@ main { flex: 1; }
 .keyboard-scroll { overflow-x: auto; border-radius: 10px; border: 1px solid var(--line); background: var(--key-black); padding: 6px 0 0; }
 .keyboard { position: relative; height: 150px; display: flex; }
 .key { border: 0; padding: 0; cursor: pointer; touch-action: manipulation; }
-.key.white { height: 100%; background: var(--key-white); border-right: 1px solid #cfcac1; border-radius: 0 0 5px 5px; display: flex; align-items: flex-end; justify-content: center; }
+.key.white { flex: none; height: 100%; background: var(--key-white); border-right: 1px solid #cfcac1; border-radius: 0 0 5px 5px; display: flex; align-items: flex-end; justify-content: center; }
 .key.black { position: absolute; top: 0; height: 62%; background: var(--key-black); border-radius: 0 0 4px 4px; z-index: 1; box-shadow: inset 0 -3px 0 #3d3a35; }
 .key.is-target { background: var(--target); }
 .key.is-down { background: var(--accent); }
-.key-label { font-size: 10px; color: #6b665e; padding-bottom: 6px; }
+.key-label { font-size: 9px; color: #6b665e; padding-bottom: 6px; }
 .key.is-down .key-label { color: #fff; }
 
 .calibrate-intro { display: flex; flex-direction: column; align-items: flex-start; gap: 14px; }
