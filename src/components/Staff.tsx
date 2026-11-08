@@ -24,7 +24,7 @@ export function Staff({ clef, midi, state }: Props) {
       {lines.map((ly) => (
         <line key={ly} x1="10" x2="230" y1={ly} y2={ly} className="staff-line" />
       ))}
-      <text className="clef" x="16" y={clef === "treble" ? 112 : 92} fontSize={clef === "treble" ? 66 : 50}>
+      <text className="clef" x="16" y={clef === "treble" ? 117 : 98} fontSize={clef === "treble" ? 92 : 62}>
         {clef === "treble" ? "𝄞" : "𝄢"}
       </text>
       {ledgers.map((ly) => (
