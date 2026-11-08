@@ -13,6 +13,8 @@ export function useInput() {
   const [message, setMessage] = useState("Connect your piano to start.");
   const [active, setActive] = useState<Set<number>>(new Set());
   const [event, setEvent] = useState<NoteEvent | null>(null);
+  const [level, setLevel] = useState(0);
+  const lastLevelAt = useRef(0);
   const stopRef = useRef<(() => void) | null>(null);
   const idRef = useRef(0);
 
@@ -24,6 +26,7 @@ export function useInput() {
     stopRef.current?.();
     stopRef.current = null;
     setActive(new Set());
+    setLevel(0);
     setMode("none");
     setMessage("Connect your piano to start.");
   }, []);
@@ -61,14 +64,24 @@ export function useInput() {
   const listenWithMic = useCallback(async () => {
     stopRef.current?.();
     try {
-      stopRef.current = await startMic((midi) => {
-        setActive(midi === null ? new Set() : new Set([midi]));
-        if (midi !== null) emit(midi, "mic");
-      });
+      stopRef.current = await startMic(
+        (midi) => {
+          setActive(midi === null ? new Set() : new Set([midi]));
+          if (midi !== null) emit(midi, "mic");
+        },
+        (l) => {
+          const now = performance.now();
+          if (now - lastLevelAt.current < 80) return;
+          lastLevelAt.current = now;
+          setLevel(l);
+        },
+      );
       setMode("mic");
-      setMessage("Listening. Play one note at a time, a little firmly.");
+      setMessage("Listening. Play one note at a time, a little firmly. The bar moves when the mic hears you.");
     } catch {
-      setMessage("Microphone access was blocked. Allow it in the browser's site settings and try again.");
+      setMessage(
+        "The microphone is blocked. Allow it for this page in Chrome, and for Chrome in System Settings → Privacy & Security → Microphone.",
+      );
     }
   }, [emit]);
 
@@ -82,7 +95,7 @@ export function useInput() {
 
   useEffect(() => () => stopRef.current?.(), []);
 
-  return { mode, message, active, event, connectKeyboard, listenWithMic, stop, pressScreenKey };
+  return { mode, message, level, active, event, connectKeyboard, listenWithMic, stop, pressScreenKey };
 }
 
 /** The mic often hears a note an octave off, so it only has to get the letter right. */

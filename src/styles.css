@@ -61,6 +61,8 @@ p { margin: 0; }
 .connect-actions button, .big-button, select { border: 1px solid var(--line); background: var(--surface); padding: 7px 12px; border-radius: 8px; cursor: pointer; font-size: 14px; }
 .connect-actions button.is-on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 .connect-actions button.quiet { border-color: transparent; color: var(--muted); }
+.meter { flex: 0 0 120px; height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; }
+.meter-fill { height: 100%; background: var(--right); transition: width 0.08s linear; }
 .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--line); flex: none; }
 .dot.is-live { background: var(--right); }
 

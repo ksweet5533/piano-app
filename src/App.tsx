@@ -36,6 +36,11 @@ export default function App() {
       <section className="connect" aria-label="Piano connection">
         <span className={`dot ${input.mode !== "none" ? "is-live" : ""}`} aria-hidden />
         <p className="connect-message">{input.message}</p>
+        {input.mode === "mic" && (
+          <div className="meter" role="meter" aria-label="Microphone level" aria-valuemin={0} aria-valuemax={1} aria-valuenow={input.level}>
+            <div className="meter-fill" style={{ width: `${Math.min(100, Math.sqrt(input.level / 0.2) * 100)}%` }} />
+          </div>
+        )}
         <div className="connect-actions">
           <button className={input.mode === "midi" ? "is-on" : ""} onClick={input.connectKeyboard}>
             Piano over USB or Bluetooth

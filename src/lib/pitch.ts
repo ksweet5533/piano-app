@@ -1,10 +1,16 @@
 import { freqToMidi, LOWEST, HIGHEST } from "./notes";
 
+const MIN_LEVEL = 0.002;
+
+export function rmsOf(input: Float32Array) {
+  let sum = 0;
+  for (const v of input) sum += v * v;
+  return Math.sqrt(sum / input.length);
+}
+
 /** Autocorrelation pitch estimate for one buffer; -1 when too quiet or unclear. */
-function detectPitch(input: Float32Array, sampleRate: number) {
-  let rms = 0;
-  for (const v of input) rms += v * v;
-  if (Math.sqrt(rms / input.length) < 0.01) return -1;
+export function detectPitch(input: Float32Array, sampleRate: number) {
+  if (rmsOf(input) < MIN_LEVEL) return -1;
 
   let start = 0;
   let end = input.length - 1;
@@ -35,13 +41,25 @@ function detectPitch(input: Float32Array, sampleRate: number) {
 
 /**
  * Listens through the microphone and reports a note once it has held steady
- * for a few frames, and null when the sound stops. Works best one note at a time.
+ * for a few frames, and null when the sound stops. A fresh attack on the same
+ * key counts again. Works best one note at a time.
  */
-export async function startMic(onNote: (midi: number | null) => void): Promise<() => void> {
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-  });
+export async function startMic(
+  onNote: (midi: number | null) => void,
+  onLevel: (level: number) => void,
+): Promise<() => void> {
+  // Made before the permission prompt so Chrome still counts it as part of the click.
   const ctx = new AudioContext();
+  let stream: MediaStream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true },
+    });
+  } catch (err) {
+    void ctx.close();
+    throw err;
+  }
+  if (ctx.state === "suspended") await ctx.resume();
   const analyser = ctx.createAnalyser();
   analyser.fftSize = 2048;
   ctx.createMediaStreamSource(stream).connect(analyser);
@@ -50,6 +68,7 @@ export async function startMic(onNote: (midi: number | null) => void): Promise<(
   let candidate = -1;
   let count = 0;
   let current: number | null = null;
+  let lastLevel = 0;
   let frame = 0;
   let raf = 0;
 
@@ -57,10 +76,17 @@ export async function startMic(onNote: (midi: number | null) => void): Promise<(
     raf = requestAnimationFrame(tick);
     if (frame++ % 2) return;
     analyser.getFloatTimeDomainData(buf);
+    const level = rmsOf(buf);
+    onLevel(level);
+    if (level > lastLevel * 1.8 && level > MIN_LEVEL * 3) {
+      // A new attack: let the same note count again.
+      count = 0;
+      current = null;
+    }
+    lastLevel = level;
     const freq = detectPitch(buf, ctx.sampleRate);
     const midi = freq > 0 ? freqToMidi(freq) : -1;
-    const valid = midi >= LOWEST && midi <= HIGHEST;
-    if (!valid) {
+    if (midi < LOWEST || midi > HIGHEST) {
       candidate = -1;
       count = 0;
       if (current !== null) { current = null; onNote(null); }
@@ -68,7 +94,7 @@ export async function startMic(onNote: (midi: number | null) => void): Promise<(
     }
     count = midi === candidate ? count + 1 : 1;
     candidate = midi;
-    if (count === 3 && midi !== current) { current = midi; onNote(midi); }
+    if (count === 2 && midi !== current) { current = midi; onNote(midi); }
   };
   tick();
 
