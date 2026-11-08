@@ -2,6 +2,8 @@
 
 A web app for adult beginners learning piano at home on a Roland FP-10.
 
+Try it: https://ksweet5533.github.io/piano-app/ (use Chrome or Edge)
+
 - Note reading: a note appears on the treble or bass staff and you play it.
 - Songs: play simple melodies one note at a time.
 - Ear training: hear a note and find it on the keys.
@@ -27,3 +29,8 @@ npm run dev
 
 Opens at http://localhost:5180. `npm test` runs the mic tests, which play simulated rooms (noise,
 hum, talking, a played phrase) through the note tracker.
+
+## Working on it together
+
+Make a branch, push it, and open a pull request. CI runs the type check, the tests and a build on
+every pull request. Each push to `main` publishes the site to GitHub Pages within a couple of minutes.
