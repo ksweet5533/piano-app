@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, readdirSync } from "fs";
 import { join } from "path";
 import { describe, expect, it } from "vitest";
-import { decodeCalibrationWav, encodeCalibrationWav, listen, scoreSequence, toInt16 } from "./calibration";
+import { decodeCalibrationWav, encodeCalibrationWav, lagsOf, listen, scoreSequence, toInt16 } from "./calibration";
 import { HIGHEST, LOWEST, isBlack, noteName } from "./notes";
 
 it("a calibration WAV keeps its audio and key labels", async () => {
@@ -45,7 +45,7 @@ type Take = {
   file: string;
   played: { from: string; to: string; keys: "white" | "all"; strikes: number };
   atLeast: { right: number };
-  atMost: { wrong: number; extra: number };
+  atMost: { wrong: number; extra: number; middleLagMs: number };
 };
 const byName = (name: string) => Array.from({ length: HIGHEST - LOWEST + 1 }, (_, i) => LOWEST + i).find((m) => noteName(m) === name)!;
 
@@ -59,11 +59,17 @@ describe("real piano takes, known sequence", () => {
         if (take.played.keys === "white" && isBlack(m)) continue;
         for (let s = 0; s < take.played.strikes; s++) played.push(m);
       }
-      const score = scoreSequence(listen(samples, sampleRate).map((h) => h.midi), played);
-      console.log(`${take.file}: ${score.right}/${played.length} right, ${score.wrong} wrong (${score.octave} octave), ${score.missed} missed, ${score.extra} extra`);
+      const heard = listen(samples, sampleRate);
+      const score = scoreSequence(heard.map((h) => h.midi), played);
+      // How quickly the middle of the keyboard (C4 to B5) answers, typically.
+      const middle = score.matched.map((j) => heard[j]).filter((h) => h.midi >= 60 && h.midi < 84);
+      const lags = lagsOf(samples, sampleRate, middle.map((h) => h.sample)).sort((a, b) => a - b);
+      const middleLag = lags[lags.length >> 1];
+      console.log(`${take.file}: ${score.right}/${played.length} right, ${score.wrong} wrong (${score.octave} octave), ${score.missed} missed, ${score.extra} extra; middle keys heard ${Math.round(middleLag)} ms after the strike`);
       expect(score.right).toBeGreaterThanOrEqual(take.atLeast.right);
       expect(score.wrong).toBeLessThanOrEqual(take.atMost.wrong);
       expect(score.extra).toBeLessThanOrEqual(take.atMost.extra);
+      expect(middleLag).toBeLessThanOrEqual(take.atMost.middleLagMs);
     });
   }
 });

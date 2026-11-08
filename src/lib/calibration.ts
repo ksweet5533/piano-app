@@ -1,5 +1,6 @@
 import { noteName } from "./notes";
-import { MIC_SETTINGS, MicListener, type MicSettings } from "./pitch";
+import { MicListener } from "./listener";
+import { HighPass } from "./pitch";
 
 /**
  * A calibration take: one WAV of everything the mic heard, plus a "keys" chunk
@@ -67,10 +68,10 @@ export const toInt16 = (block: Float32Array) => {
 };
 
 /** Runs a take through the app's listener the way the browser feeds it, in 128-sample blocks. */
-export function listen(samples: Float32Array, sampleRate: number, settings: MicSettings = MIC_SETTINGS) {
+export function listen(samples: Float32Array, sampleRate: number) {
   const heard: { sample: number; midi: number }[] = [];
   let at = 0;
-  const listener = new MicListener(sampleRate, (r) => r.note !== undefined && heard.push({ sample: at, midi: r.note }), settings);
+  const listener = new MicListener(sampleRate, (r) => r.note !== undefined && heard.push({ sample: at + 128, midi: r.note }));
   for (; at < samples.length; at += 128) listener.feed(samples.subarray(at, at + 128));
   return heard;
 }
@@ -78,6 +79,7 @@ export function listen(samples: Float32Array, sampleRate: number, settings: MicS
 /**
  * Lines up what was heard with the notes known to have been played, in order,
  * and counts each strike as right, wrong (with octave slips noted), missed, or extra.
+ * `matched` lists which of the heard notes were right.
  */
 export function scoreSequence(heard: number[], played: number[]) {
   const n = played.length;
@@ -97,13 +99,15 @@ export function scoreSequence(heard: number[], played: number[]) {
       step[i][j] = best;
     }
   }
-  const result = { right: 0, wrong: 0, octave: 0, missed: 0, extra: 0, problems: [] as string[] };
+  const result = { right: 0, wrong: 0, octave: 0, missed: 0, extra: 0, problems: [] as string[], matched: [] as number[] };
   for (let i = n, j = k; i > 0 || j > 0; ) {
     const s = i > 0 && j > 0 ? step[i][j] : i > 0 ? 1 : 2;
     if (s === 0) {
       const [p, h] = [played[i - 1], heard[j - 1]];
-      if (p === h) result.right++;
-      else {
+      if (p === h) {
+        result.right++;
+        result.matched.unshift(j - 1);
+      } else {
         result.wrong++;
         if (p % 12 === h % 12) result.octave++;
         result.problems.unshift(`${noteName(p)} heard as ${noteName(h)}`);
@@ -121,4 +125,29 @@ export function scoreSequence(heard: number[], played: number[]) {
     }
   }
   return result;
+}
+
+/**
+ * How long after each strike its note was heard, in ms. A strike's start is the
+ * sharpest rise in loudness in the 300 ms before the note was heard.
+ */
+export function lagsOf(samples: Float32Array, sampleRate: number, heardAt: number[]) {
+  const frame = 64;
+  const filtered = new HighPass(sampleRate, 180).process(samples);
+  const loudness = new Float64Array(Math.floor(samples.length / frame));
+  for (let f = 0; f < loudness.length; f++) {
+    let sum = 0;
+    for (let i = 0; i < frame; i++) sum += filtered[f * frame + i] ** 2;
+    loudness[f] = Math.log(sum / frame + 1e-12);
+  }
+  return heardAt.map((at) => {
+    const last = Math.min(loudness.length - 1, Math.floor(at / frame));
+    let start = last;
+    let steepest = -Infinity;
+    for (let f = Math.max(3, last - Math.round((0.3 * sampleRate) / frame)); f <= last; f++) {
+      const rise = loudness[f] - Math.min(loudness[f - 1], loudness[f - 2], loudness[f - 3]);
+      if (rise > steepest) [steepest, start] = [rise, f];
+    }
+    return ((at - start * frame) / sampleRate) * 1000;
+  });
 }

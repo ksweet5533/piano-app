@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { encodeCalibrationWav, toInt16, type KeyTake } from "../lib/calibration";
 import { HIGHEST, LOWEST, noteName } from "../lib/notes";
-import { startMic, type MicSession } from "../lib/pitch";
+import { startMic, type MicSession } from "../lib/mic";
 
 const STRIKES = 3;
 

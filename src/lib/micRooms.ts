@@ -1,5 +1,5 @@
 import { midiToFreq } from "./notes";
-import { MIC_SETTINGS, MicListener, type MicSettings } from "./pitch";
+import { MicListener } from "./listener";
 
 // Simulated rooms: what a laptop mic hears, fed to the app's listener exactly as the browser would.
 const SR = 48000;
@@ -52,6 +52,9 @@ const PHRASE = [[60, 0.5], [64, 1.1], [64, 1.7], [67, 2.3], [48, 3.0], [72, 3.6]
 const played = (amp?: number) => PHRASE.map(([m, at]) => piano(m, at, amp));
 const PHRASE_NOTES = PHRASE.map(([m]) => m);
 
+// Playing that jumps between the middle and the bass, a key every 0.6 s, each let go before the next.
+const LEAPS = [[60, 0.5], [43, 1.1], [72, 1.7], [38, 2.3], [67, 2.9]] as const;
+
 export type Room = { name: string; sounds: () => Sound[]; seconds: number; expected: number[] };
 
 export const ROOMS: Room[] = [
@@ -59,6 +62,7 @@ export const ROOMS: Room[] = [
   { name: "ignores a steady hum", sounds: () => [noise(0.002), hum(120, 0.02)], seconds: 4, expected: [] },
   { name: "ignores talking", sounds: () => [noise(0.002), voice(0.5, 3.5, 0.05)], seconds: 4, expected: [] },
   { name: "hears each key, including a repeated one", sounds: () => [noise(0.003), ...played()], seconds: 4.5, expected: PHRASE_NOTES },
+  { name: "hears playing that leaps between the middle and the bass", sounds: () => [noise(0.003), ...LEAPS.map(([m, at]) => piano(m, at))], seconds: 3.6, expected: LEAPS.map(([m]) => m) },
   { name: "hears playing over a hum", sounds: () => [noise(0.002), hum(120, 0.005), ...played(0.08)], seconds: 4.5, expected: PHRASE_NOTES },
   { name: "hears playing while someone talks", sounds: () => [noise(0.002), voice(0.3, 4.2, 0.02), ...played()], seconds: 4.5, expected: PHRASE_NOTES },
   {
@@ -78,12 +82,12 @@ export const ROOMS: Room[] = [
 ];
 
 /** Feeds a room to the app's own listener in the 128-sample blocks the browser delivers. */
-export function heard(room: Room, settings: MicSettings = MIC_SETTINGS) {
+export function heard(room: Room) {
   const sounds = room.sounds();
   const signal = new Float32Array(Math.floor(room.seconds * SR));
   for (let i = 0; i < signal.length; i++) for (const s of sounds) signal[i] += s(i / SR);
   const notes: number[] = [];
-  const listener = new MicListener(SR, (r) => r.note !== undefined && notes.push(r.note), settings);
+  const listener = new MicListener(SR, (r) => r.note !== undefined && notes.push(r.note));
   for (let i = 0; i < signal.length; i += 128) listener.feed(signal.subarray(i, i + 128));
   return notes;
 }

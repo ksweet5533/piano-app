@@ -4,6 +4,6 @@
     "about": "Roland FP-10 through a MacBook Pro's built-in mic, home room. Every white key A0 to C8, 3 strikes each (soft, medium, firm).",
     "played": { "from": "A0", "to": "C8", "keys": "white", "strikes": 3 },
     "atLeast": { "right": 145 },
-    "atMost": { "wrong": 4, "extra": 0 }
+    "atMost": { "wrong": 4, "extra": 0, "middleLagMs": 65 }
   }
 ]

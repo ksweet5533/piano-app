@@ -20,6 +20,10 @@ struck (a sudden rise above the room's background) and its pitch holds steady, s
 fading notes are ignored. It works one note at a time and only checks the letter, since a mic often
 hears a piano an octave off.
 
+Two listeners share the mic. The quick one reads the middle of the keyboard (C4 to B5) within a few
+cycles of the strike, through a steep high-pass that clears the key's thump. The careful one takes
+longer windows and covers the bass, the top, and any middle note the quick one wasn't sure of.
+
 ## Running it
 
 ```bash

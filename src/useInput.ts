@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { connectMidi } from "./lib/midi";
-import { startMic } from "./lib/pitch";
+import { startMic } from "./lib/mic";
 import { playNote } from "./lib/synth";
 
 export type Source = "midi" | "mic" | "screen";
