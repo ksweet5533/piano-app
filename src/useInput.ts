@@ -64,7 +64,7 @@ export function useInput() {
   const listenWithMic = useCallback(async () => {
     stopRef.current?.();
     try {
-      stopRef.current = await startMic(
+      const session = await startMic(
         (midi) => {
           setActive(midi === null ? new Set() : new Set([midi]));
           if (midi !== null) emit(midi, "mic");
@@ -76,6 +76,7 @@ export function useInput() {
           setLevel(l);
         },
       );
+      stopRef.current = session.stop;
       setMode("mic");
       setMessage("Listening. Play one note at a time, a little firmly. The bar moves when the mic hears you.");
     } catch {

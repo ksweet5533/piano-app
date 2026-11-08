@@ -1,11 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { midiToFreq } from "./notes";
-import { MicNoteTracker, RUMBLE_CUTOFF } from "./pitch";
+import { MicListener } from "./pitch";
 
 // Simulated rooms: what a laptop mic hears, frame by frame, as the app reads it.
 const SR = 48000;
-const HOP = 1600;
-const N = 2048;
 type Sound = (t: number) => number;
 
 const noise = (a: number): Sound => () => (Math.random() - 0.5) * 2 * a;
@@ -35,32 +33,13 @@ const voice = (from: number, to: number, a: number): Sound => (t) => {
   return a * syllable * (Math.sin(phase) + 0.6 * Math.sin(2 * phase) + 0.4 * Math.sin(3 * phase) + 0.3 * (Math.random() - 0.5));
 };
 
-/** The same rumble filter the app puts in front of the tracker (Web Audio's "highpass" biquad). */
-function highPass(x: Float32Array) {
-  const w = (2 * Math.PI * RUMBLE_CUTOFF) / SR;
-  const alpha = Math.sin(w) / (2 * Math.SQRT1_2);
-  const cos = Math.cos(w);
-  const [b0, b1, b2] = [(1 + cos) / 2, -(1 + cos), (1 + cos) / 2];
-  const [a0, a1, a2] = [1 + alpha, -2 * cos, 1 - alpha];
-  let [x1, x2, y1, y2] = [0, 0, 0, 0];
-  for (let i = 0; i < x.length; i++) {
-    const y = (b0 * x[i] + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2) / a0;
-    [x2, x1, y2, y1] = [x1, x[i], y1, y];
-    x[i] = y;
-  }
-  return x;
-}
-
+/** Feeds the sound to the app's own listener in the 128-sample blocks the browser delivers. */
 function heard(sounds: Sound[], seconds: number) {
   const signal = new Float32Array(Math.floor(seconds * SR));
   for (let i = 0; i < signal.length; i++) for (const s of sounds) signal[i] += s(i / SR);
-  highPass(signal);
-  const tracker = new MicNoteTracker(SR);
   const notes: number[] = [];
-  for (let start = 0; start + N < signal.length; start += HOP) {
-    const r = tracker.push(signal.slice(start, start + N));
-    if (r.note !== undefined) notes.push(r.note);
-  }
+  const listener = new MicListener(SR, (r) => r.note !== undefined && notes.push(r.note));
+  for (let i = 0; i < signal.length; i += 128) listener.feed(signal.subarray(i, i + 128));
   return notes;
 }
 

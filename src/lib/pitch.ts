@@ -121,11 +121,94 @@ export class MicNoteTracker {
   }
 }
 
-/** Listens through the microphone and reports each key strike. Works best one note at a time. */
+/** Web Audio's "highpass" biquad (Q = 1/√2), in plain code so the app and the tests filter identically. */
+export class HighPass {
+  private b: [number, number, number];
+  private a: [number, number];
+  private x1 = 0;
+  private x2 = 0;
+  private y1 = 0;
+  private y2 = 0;
+
+  constructor(sampleRate: number, cutoff: number) {
+    const w = (2 * Math.PI * cutoff) / sampleRate;
+    const alpha = Math.sin(w) / (2 * Math.SQRT1_2);
+    const cos = Math.cos(w);
+    const a0 = 1 + alpha;
+    this.b = [(1 + cos) / 2 / a0, -(1 + cos) / a0, (1 + cos) / 2 / a0];
+    this.a = [(-2 * cos) / a0, (1 - alpha) / a0];
+  }
+
+  process(input: Float32Array, out = new Float32Array(input.length)) {
+    const [b0, b1, b2] = this.b;
+    const [a1, a2] = this.a;
+    for (let i = 0; i < input.length; i++) {
+      const x = input[i];
+      const y = b0 * x + b1 * this.x1 + b2 * this.x2 - a1 * this.y1 - a2 * this.y2;
+      this.x2 = this.x1;
+      this.x1 = x;
+      this.y2 = this.y1;
+      this.y1 = y;
+      out[i] = y;
+    }
+    return out;
+  }
+}
+
+const WINDOW = 2048;
+
+/**
+ * Raw mic samples in, key presses out. Filters out rumble, then looks at the
+ * latest 2048 samples about 30 times a second, whatever the screen's refresh rate.
+ */
+export class MicListener {
+  private filter: HighPass;
+  private tracker: MicNoteTracker;
+  private ring = new Float32Array(WINDOW);
+  private filled = 0;
+  private sinceLast = 0;
+  private hop: number;
+
+  constructor(sampleRate: number, private onReading: (r: MicReading) => void) {
+    this.filter = new HighPass(sampleRate, RUMBLE_CUTOFF);
+    this.tracker = new MicNoteTracker(sampleRate);
+    this.hop = Math.round(sampleRate / 30);
+  }
+
+  feed(block: Float32Array) {
+    const filtered = this.filter.process(block);
+    for (let i = 0; i < filtered.length; i++) {
+      this.ring[this.filled % WINDOW] = filtered[i];
+      this.filled++;
+      if (++this.sinceLast >= this.hop && this.filled >= WINDOW) {
+        this.sinceLast = 0;
+        const start = this.filled % WINDOW;
+        const frame = new Float32Array(WINDOW);
+        frame.set(this.ring.subarray(start));
+        frame.set(this.ring.subarray(0, start), WINDOW - start);
+        this.onReading(this.tracker.push(frame));
+      }
+    }
+  }
+}
+
+// Hands every block of raw mic samples from the audio thread to the page.
+const TAP = `class Tap extends AudioWorkletProcessor {
+  process(inputs) { const ch = inputs[0] && inputs[0][0]; if (ch) this.port.postMessage(ch.slice(0)); return true; }
+}
+registerProcessor("tap", Tap);`;
+
+export type MicSession = { stop: () => void; sampleRate: number };
+
+/**
+ * Listens through the microphone and reports each key strike. Works best one
+ * note at a time. onAudio, when given, also receives the raw samples (for calibration).
+ */
 export async function startMic(
   onNote: (midi: number | null) => void,
   onLevel: (level: number) => void,
-): Promise<() => void> {
+  onAudio?: (block: Float32Array) => void,
+): Promise<MicSession> {
   // Made before the permission prompt so Chrome still counts it as part of the click.
   const ctx = new AudioContext();
   let stream: MediaStream;
@@ -138,31 +221,31 @@ export async function startMic(
     throw err;
   }
   if (ctx.state === "suspended") await ctx.resume();
-  const analyser = ctx.createAnalyser();
-  analyser.fftSize = 2048;
-  const rumble = ctx.createBiquadFilter();
-  rumble.type = "highpass";
-  rumble.frequency.value = RUMBLE_CUTOFF;
-  ctx.createMediaStreamSource(stream).connect(rumble).connect(analyser);
-  const buf = new Float32Array(analyser.fftSize);
-  const tracker = new MicNoteTracker(ctx.sampleRate);
 
-  let frame = 0;
-  let raf = 0;
-  const tick = () => {
-    raf = requestAnimationFrame(tick);
-    if (frame++ % 2) return;
-    analyser.getFloatTimeDomainData(buf);
-    const r = tracker.push(buf);
+  const url = URL.createObjectURL(new Blob([TAP], { type: "text/javascript" }));
+  await ctx.audioWorklet.addModule(url);
+  URL.revokeObjectURL(url);
+  const tap = new AudioWorkletNode(ctx, "tap");
+  const mute = ctx.createGain();
+  mute.gain.value = 0;
+  ctx.createMediaStreamSource(stream).connect(tap).connect(mute).connect(ctx.destination);
+
+  const listener = new MicListener(ctx.sampleRate, (r) => {
     onLevel(r.level);
     if (r.released) onNote(null);
     if (r.note !== undefined) onNote(r.note);
+  });
+  tap.port.onmessage = (e: MessageEvent<Float32Array>) => {
+    onAudio?.(e.data);
+    listener.feed(e.data);
   };
-  tick();
 
-  return () => {
-    cancelAnimationFrame(raf);
-    stream.getTracks().forEach((t) => t.stop());
-    void ctx.close();
+  return {
+    sampleRate: ctx.sampleRate,
+    stop: () => {
+      tap.port.onmessage = null;
+      stream.getTracks().forEach((t) => t.stop());
+      void ctx.close();
+    },
   };
 }

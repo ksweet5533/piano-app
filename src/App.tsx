@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Keyboard } from "./components/Keyboard";
 import { useInput } from "./useInput";
+import { Calibrate } from "./views/Calibrate";
 import { EarTraining } from "./views/EarTraining";
 import { NoteReading } from "./views/NoteReading";
 import { Practice } from "./views/Practice";
@@ -11,6 +12,7 @@ const TABS = [
   { id: "songs", label: "Songs" },
   { id: "ear", label: "Ear training" },
   { id: "practice", label: "Practice" },
+  { id: "calibrate", label: "Calibrate" },
 ] as const;
 type Tab = (typeof TABS)[number]["id"];
 
@@ -61,6 +63,7 @@ export default function App() {
         {tab === "songs" && <Songs {...view} />}
         {tab === "ear" && <EarTraining {...view} />}
         {tab === "practice" && <Practice setHighlight={setHighlight} />}
+        {tab === "calibrate" && <Calibrate stopInput={input.stop} setHighlight={setHighlight} />}
       </main>
 
       <footer className="keys">

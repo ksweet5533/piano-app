@@ -112,3 +112,18 @@ main { flex: 1; }
 .key.is-down { background: var(--accent); }
 .key-label { font-size: 10px; color: #6b665e; padding-bottom: 6px; }
 .key.is-down .key-label { color: #fff; }
+
+.calibrate-intro { display: flex; flex-direction: column; align-items: flex-start; gap: 14px; }
+.calibrate-intro ol { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
+.calibrate-target { font-size: 40px; font-weight: 700; }
+.calibrate-meter { flex: none; width: 200px; }
+.song-notes li.is-wrong-note { background: var(--wrong-soft); color: var(--wrong); border-color: transparent; }
+.song-notes li.is-empty { color: var(--muted); border-style: dashed; font-weight: 400; }
+.calibrate-done { display: flex; flex-direction: column; gap: 16px; }
+.key-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(46px, 1fr)); gap: 4px; }
+.key-cell { font-size: 12px; text-align: center; padding: 4px 0; border-radius: 6px; background: var(--line); }
+.key-cell.is-right { background: var(--right-soft); color: var(--right); }
+.key-cell.is-partly { background: #fff3d6; color: #8a5a00; }
+.key-cell.is-missed { background: var(--line); color: var(--muted); }
+.key-cell.is-wrong { background: var(--wrong-soft); color: var(--wrong); }
+@media (prefers-color-scheme: dark) { .key-cell.is-partly { background: #3a2e12; color: #f5c46b; } }
